@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CravingReadingBruh</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#fafafa; --card:#ffffff; --muted:#6b7280; --accent:#3b82f6;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,system-ui,Arial;background:var(--bg);color:#0f172a}
+  header{background:#111827;color:#fff;padding:16px 20px;display:flex;align-items:center;justify-content:space-between}
+  header h1{margin:0;font-size:1.125rem;font-weight:600}
+  header p{margin:0;color:#d1d5db;font-size:0.9rem}
+  main{padding:20px;max-width:1200px;margin:0 auto}
+  .search-row{display:flex;gap:10px;margin:12px 0}
+  .search-row input{flex:1;padding:10px 12px;border-radius:8px;border:1px solid #e6e9ef}
+  .search-row button{padding:10px 12px;border-radius:8px;border:none;background:var(--accent);color:white;cursor:pointer}
+  .genre{margin:18px 0}
+  .genre h2{margin:0 0 10px 0;font-size:1.05rem;color:#0f172a}
+  .row{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px}
+  .row::-webkit-scrollbar{height:8px}
+  .row::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:999px}
+  .card{flex:0 0 160px;background:var(--card);border-radius:var(--radius);box-shadow:0 6px 18px rgba(15,23,42,0.06);overflow:hidden;border:1px solid #eef2ff;margin-right:4px}
+  .cover{width:160px;height:220px;background:#f3f4f6 center/cover no-repeat;display:block}
+  .meta{padding:8px}
+  .meta .title{font-size:13px;font-weight:600;line-height:1.15;margin-bottom:6px;min-height:32px}
+  .meta .author{font-size:12px;color:var(--muted);min-height:18px}
+  .meta .cta{display:flex;margin-top:8px;gap:6px}
+  .btn{flex:1;padding:8px;font-size:12px;border-radius:8px;border:none;cursor:pointer;text-decoration:none;text-align:center}
+  .btn.read{background:#10b981;color:white}
+  .btn.preview{background:transparent;border:1px solid #e6e9ef;color:#0f172a}
+  footer{text-align:center;padding:28px 10px;color:var(--muted);font-size:13px}
+  @media (max-width:560px){ .card{flex:0 0 140px} .cover{width:140px;height:200px} }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>CravingReadingBruh</h1>
+    <p style="margin-top:6px;font-size:12px">Public-domain & free-preview books from multiple sources</p>
+  </div>
+  <div id="counts" style="font-size:13px;color:#d1d5db">Loading…</div>
+</header>
+
+<main>
+  <div class="search-row">
+    <input id="globalSearch" placeholder="Search titles, authors or keywords (press Enter)"/>
+    <button id="searchBtn">Search</button>
+  </div>
+
+  <div id="genresContainer"></div>
+</main>
+
+<footer>
+  Aggregates Open Library, Google Books (free ebooks), and Gutendex (Gutenberg). Only links to free/public-domain & previewable books.
+</footer>
+
+<script>
+/* -------------------------------
+   Config & categories (no Romance)
+   ------------------------------- */
+const CATEGORIES = [
+  {key:'classics', label:'Classics', q:'classic literature'},
+  {key:'mystery', label:'Mystery & Detective', q:'mystery detective'},
+  {key:'sci', label:'Science Fiction', q:'science fiction'},
+  {key:'comics', label:'Comics & Graphic Novels', q:'comics graphic novel'},
+  {key:'horror', label:'Horror', q:'horror'},
+  {key:'history', label:'History', q:'history'},
+  {key:'biography', label:'Biography & Memoir', q:'biography memoir'},
+  {key:'nonfiction', label:'Non-fiction', q:'nonfiction'},
+  {key:'adventure', label:'Adventure', q:'adventure'}
+];
+
+const MAX_PER_SOURCE = 18; // how many per API per category (keeps page reasonable)
+const genresContainer = document.getElementById('genresContainer');
+const countsEl = document.getElementById('counts');
+
+let totalShown = 0;
+
+/* -------------------------------
+   Helpers
+   ------------------------------- */
+function dom(tag, cls){ const e = document.createElement(tag); if(cls) e.className = cls; return e; }
+function safeText(s){ return s? String(s) : ''; }
+function isRomanceTag(text){
+  if(!text) return false;
+  return /romance/i.test(text);
+}
+function dedupeBooks(arr){
+  const map = new Map();
+  for(const b of arr){
+    const key = (b.title + '|' + (b.author||'')).toLowerCase();
+    if(!map.has(key)) map.set(key,b);
+  }
+  return Array.from(map.values());
+}
+
+/* -------------------------------
+   Unified book object:
+     {
+       title, author, cover, link, source
+     }
+   ------------------------------- */
+
+async function fetchGutendex(q){
+  try{
+    const res = await fetch('https://gutendex.com/books/?search=' + encodeURIComponent(q));
+    const j = await res.json();
+    return (j.results || []).slice(0, MAX_PER_SOURCE).map(book => ({
+      title: book.title,
+      author: (book.authors||[]).map(a=>a.name).join(', '),
+      cover: book.formats && book.formats['image/jpeg'] ? book.formats['image/jpeg'] : null,
+      link: book.formats && (book.formats['text/html'] || book.formats['text/plain; charset=utf-8'] || book.formats['application/epub+zip']) || 'https://www.gutenberg.org',
+      source: 'gutenberg'
+    }));
+  }catch(e){
+    console.warn('Gutendex error', e);
+    return [];
+  }
+}
+
+async function fetchOpenLibrary(q){
+  // OpenLibrary: search.json?q=... (title or subject)
+  try{
+    // search by subject first (better results), fallback to q if no docs
+    let res = await fetch('https://openlibrary.org/subjects/' + encodeURIComponent(q.split(' ')[0]) + '.json?limit=' + MAX_PER_SOURCE);
+    let j = await res.json();
+    let docs = (j.works || []);
+    if(!docs.length){
+      res = await fetch('https://openlibrary.org/search.json?q=' + encodeURIComponent(q) + '&limit=' + MAX_PER_SOURCE);
+      j = await res.json();
+      docs = j.docs || [];
+    }
+    return docs.slice(0, MAX_PER_SOURCE).map(d => {
+      const title = d.title || d.work_title || d.name;
+      const author = Array.isArray(d.authors) ? d.authors.map(x=>x.name).join(', ') : (d.author_name ? d.author_name.join(', ') : '');
+      // cover id: cover_id or cover_i
+      const coverId = d.cover_id || d.cover_i;
+      const cover = coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null;
+      // link to OL page if available
+      const key = d.key || (d.edition_key && d.edition_key[0]) || null;
+      const link = key ? `https://openlibrary.org${key}` : (d.ia && d.ia[0] ? `https://archive.org/details/${d.ia[0]}` : null);
+      return {title, author, cover, link, source: 'openlibrary'};
+    });
+  }catch(e){
+    console.warn('OpenLibrary error', e);
+    return [];
+  }
+}
+
+async function fetchGoogleBooks(q){
+  // Use filter=free-ebooks to avoid paywalled results, maxResults up to 40 allowed but we'll request smaller
+  try{
+    const res = await fetch('https://www.googleapis.com/books/v1/volumes?q=' + encodeURIComponent(q) + '&filter=free-ebooks&maxResults=' + Math.min(MAX_PER_SOURCE, 20));
+    const j = await res.json();
+    const items = j.items || [];
+    return items.slice(0, MAX_PER_SOURCE).map(it => {
+      const vi = it.volumeInfo || {};
+      const title = vi.title;
+      const author = vi.authors ? vi.authors.join(', ') : '';
+      let cover = vi.imageLinks && (vi.imageLinks.thumbnail || vi.imageLinks.small || vi.imageLinks.smallThumbnail) || null;
+      if(cover) cover = cover.replace(/^http:\/\//i,'https://'); // ensure https
+      // previewLink or infoLink or accessInfo.webReaderLink
+      const link = (it.accessInfo && it.accessInfo.webReaderLink) || vi.previewLink || vi.infoLink || null;
+      const categories = vi.categories ? vi.categories.join(' ') : '';
+      return {title, author, cover, link, source:'google', categories};
+    });
+  }catch(e){
+    console.warn('Google Books error', e);
+    return [];
+  }
+}
+
+/* -------------------------------
+   Build UI: for each category, fetch from sources and render
+   ------------------------------- */
+
+function createGenreSection(cat){
+  const wrap = dom('section','genre');
+  const h = dom('h2'); h.textContent = cat.label;
+  const row = dom('div','row');
+  row.setAttribute('data-key', cat.key);
+  wrap.appendChild(h);
+  wrap.appendChild(row);
+  genresContainer.appendChild(wrap);
+  return row;
+}
+
+function createCard(book){
+  const card = dom('div','card');
+  const cover = dom('div','cover');
+  if(book.cover) cover.style.backgroundImage = `url(${book.cover})`;
+  else cover.style.backgroundImage = 'linear-gradient(135deg,#eef9ff,#fde7f3)';
+  cover.setAttribute('data-src', book.cover || '');
+  const meta = dom('div','meta');
+  const title = dom('div','title'); title.textContent = book.title || 'Untitled';
+  const author = dom('div','author'); author.textContent = book.author || '';
+  const actions = dom('div','cta');
+  const read = dom('a','btn read'); read.textContent = 'Read';
+  read.href = book.link || '#'; read.target = '_blank';
+  const preview = dom('a','btn preview'); preview.textContent = 'Info';
+  preview.href = book.link || '#'; preview.target = '_blank';
+  actions.appendChild(read); actions.appendChild(preview);
+  meta.appendChild(title); meta.appendChild(author); meta.appendChild(actions);
+  card.appendChild(cover); card.appendChild(meta);
+  return card;
+}
+
+// lazy load backgrounds for .cover elements
+const io = new IntersectionObserver((entries, obs) => {
+  entries.forEach(e => {
+    if(e.isIntersecting){
+      const c = e.target;
+      const src = c.getAttribute('data-src');
+      if(src){
+        // create image to check load
+        const img = new Image();
+        img.onload = () => c.style.backgroundImage = `url(${src})`;
+        img.onerror = () => {}; // keep placeholder
+        img.src = src;
+      }
+      obs.unobserve(c);
+    }
+  });
+},{rootMargin:'200px 0px',threshold:0.01});
+
+/* -------------------------------
+   Load one category: call three APIs, merge, render
+   ------------------------------- */
+async function loadCategory(catRow, query){
+  // show spinner
+  catRow.innerHTML = '<div style="padding:18px;color:#6b7280">Loading…</div>';
+  try{
+    // launch all three in parallel
+    const [guten, openl, google] = await Promise.all([
+      fetchGutendex(query),
+      fetchOpenLibrary(query),
+      fetchGoogleBooks(query)
+    ]);
+    // combine
+    let combined = [...guten, ...openl, ...google];
+    // filter out any item that looks like romance (title/author/categories)
+    combined = combined.filter(b => {
+      if(isRomanceTag(b.title) || isRomanceTag(b.author) || isRomanceTag(b.categories)) return false;
+      return true;
+    });
+    // normalize missing covers by attempting OpenLibrary for Google/Guten if missing (light attempt)
+    // dedupe by title|author
+    combined = dedupeBooks(combined).slice(0, Math.min(40, combined.length));
+    // render
+    catRow.innerHTML = '';
+    combined.forEach(b => {
+      const card = createCard(b);
+      catRow.appendChild(card);
+      const coverEl = card.querySelector('.cover');
+      io.observe(coverEl);
+      totalShown++;
+    });
+    countsEl.textContent = totalShown + ' books loaded';
+  }catch(e){
+    catRow.innerHTML = '<div style="padding:18px;color:#f87171">Failed to load.</div>';
+    console.error(e);
+  }
+}
+
+/* -------------------------------
+   Initialize all categories
+   ------------------------------- */
+(async function init(){
+  // build sections
+  for(const c of CATEGORIES){
+    const row = createGenreSection(c);
+    // load each category with its query (slightly delayed to reduce spike)
+    // we call loadCategory but throttle small delay between them so browser networks don't spike
+    setTimeout(()=> loadCategory(row, c.q), 200 * (CATEGORIES.indexOf(c)+1));
+  }
+})();
+
+/* -------------------------------
+   Search (fills the first row with results)
+   ------------------------------- */
+const searchBtn = document.getElementById('searchBtn');
+const globalSearch = document.getElementById('globalSearch');
+searchBtn.addEventListener('click', doSearch);
+globalSearch.addEventListener('keydown', (e)=> { if(e.key === 'Enter') doSearch(); });
+
+function doSearch(){
+  const q = globalSearch.value.trim();
+  if(!q) return;
+  // put search results into the top (classics) row
+  const topRow = document.querySelector('.row[data-key="classics"]') || document.querySelector('.row');
+  if(topRow) loadCategory(topRow, q);
+}
+
+/* -------------------------------
+   Simple caching: avoid reloading same category within session
+   ------------------------------- */
+/* (Could be improved with caching per category using a Map) */
+
+</script>
+</body>
+</html>
